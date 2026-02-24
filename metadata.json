@@ -1,0 +1,5 @@
+{
+  "name": "IDR Payment Bot",
+  "description": "Telegram bot for IDR top-up and withdrawal via E-Wallets and Banks with manual admin verification.",
+  "requestFramePermissions": []
+}
