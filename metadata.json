@@ -1,5 +1,5 @@
 {
   "name": "IDR Payment Bot",
-  "description": "Telegram bot for IDR top-up and withdrawal via E-Wallets and Banks with manual admin verification.",
+  "description": "Telegram bot for IDR top-up, withdrawal, and crypto trading (BNB/USDT/SUI) with manual and auto-verification.",
   "requestFramePermissions": []
 }

@@ -6,6 +6,10 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import { ethers } from "ethers";
+import { SuiGrpcClient } from "@mysten/sui/grpc";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { Transaction } from "@mysten/sui/transactions";
+import { fromBase64 } from "@mysten/sui/utils";
 
 dotenv.config({ quiet: true } as any);
 
@@ -101,12 +105,16 @@ try {
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const adminChatId = process.env.ADMIN_CHAT_ID;
 const bnbAdminAddress = (process.env.BNB_TESTNET_ADDRESS || "0x0000000000000000000000000000000000000000").toLowerCase();
+const suiAdminAddress = (process.env.SUI_TESTNET_ADDRESS || "0x0000000000000000000000000000000000000000000000000000000000000000").toLowerCase();
 let bnbRate = 10000; 
 let bnbBuyRate = 11000; 
 let usdtRate = 15000; 
 let usdtBuyRate = 16000; 
+let suiRate = 20000;
+let suiBuyRate = 22000;
 
 const bscTestnetProvider = new ethers.JsonRpcProvider("https://data-seed-prebsc-1-s1.binance.org:8545/");
+const suiClient = new SuiGrpcClient({ network: 'testnet', baseUrl: 'https://fullnode.testnet.sui.io:443' });
 const usdtContractAddress = process.env.USDT_CONTRACT_ADDRESS || "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd";
 const ERC20_ABI = [
   "function transfer(address to, uint256 amount) public returns (bool)",
@@ -116,7 +124,10 @@ const ERC20_ABI = [
 ];
 
 const hotWalletKey = process.env.HOT_WALLET_PRIVATE_KEY;
+const suiHotWalletKey = process.env.SUI_HOT_WALLET_PRIVATE_KEY; // Base64 or Hex
 let hotWallet: ethers.Wallet | null = null;
+let suiHotWallet: Ed25519Keypair | null = null;
+
 if (hotWalletKey) {
   try {
     hotWallet = new ethers.Wallet(hotWalletKey, bscTestnetProvider);
@@ -126,9 +137,19 @@ if (hotWalletKey) {
   }
 }
 
+if (suiHotWalletKey) {
+  try {
+    // Sui SDK expects secret key in specific format, often fromBase64
+    suiHotWallet = Ed25519Keypair.fromSecretKey(fromBase64(suiHotWalletKey));
+    console.log(`✅ Sui Hot Wallet initialized: ${suiHotWallet.getPublicKey().toSuiAddress()}`);
+  } catch (e) {
+    console.error("❌ Failed to initialize Sui hot wallet:", e);
+  }
+}
+
 async function updateRates() {
   try {
-    const response = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=binancecoin,tether&vs_currencies=idr");
+    const response = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=binancecoin,tether,sui&vs_currencies=idr");
     const data = await response.json() as any;
     
     if (data.binancecoin?.idr) {
@@ -140,7 +161,12 @@ async function updateRates() {
       usdtRate = data.tether.idr;
       usdtBuyRate = Math.floor(usdtRate * 1.05);
     }
-    console.log(`📊 Rates Updated - BNB: ${bnbRate}, USDT: ${usdtRate}`);
+
+    if (data.sui?.idr) {
+      suiRate = data.sui.idr;
+      suiBuyRate = Math.floor(suiRate * 1.1);
+    }
+    console.log(`📊 Rates Updated - BNB: ${bnbRate}, USDT: ${usdtRate}, SUI: ${suiRate}`);
   } catch (error) {
     console.error("❌ Error fetching prices:", error);
   }
@@ -333,6 +359,13 @@ function setupBotLogic(activeBot: TelegramBot) {
       });
     }
 
+    else if (data === "select_jual_sui") {
+      updateRates().then(() => {
+        userStates.set(chatId, { action: "awaiting_bnb_amount", method: "SUI_TESTNET", tokenType: "SUI" } as any);
+        activeBot.sendMessage(chatId, `Anda memilih Jual SUI Testnet.\nRate Real-time: 1 SUI = *${formatIDR(suiRate)}*\n\nSilakan masukkan jumlah SUI yang ingin dijual (misal: 10):`, { parse_mode: "Markdown" });
+      });
+    }
+
     else if (data === "select_jual_usdt") {
       updateRates().then(() => {
         userStates.set(chatId, { action: "awaiting_bnb_amount", method: "USDT_BEP20", tokenType: "USDT" } as any);
@@ -348,6 +381,17 @@ function setupBotLogic(activeBot: TelegramBot) {
       updateRates().then(() => {
         userStates.set(chatId, { action: "awaiting_buy_bnb_amount", method: "BNB_TESTNET", tokenType: "BNB" } as any);
         activeBot.sendMessage(chatId, `Anda memilih Beli BNB Testnet.\nRate: 1 BNB = *${formatIDR(bnbBuyRate)}*\n\nSilakan masukkan jumlah BNB yang ingin dibeli (misal: 0.1):`, { parse_mode: "Markdown" });
+      });
+    }
+
+    else if (data === "select_beli_sui") {
+      if (!suiHotWallet) {
+        activeBot.sendMessage(chatId, "❌ Fitur Beli SUI sedang dinonaktifkan oleh admin (Sui Hot Wallet belum siap).");
+        return;
+      }
+      updateRates().then(() => {
+        userStates.set(chatId, { action: "awaiting_buy_bnb_amount", method: "SUI_TESTNET", tokenType: "SUI" } as any);
+        activeBot.sendMessage(chatId, `Anda memilih Beli SUI Testnet.\nRate: 1 SUI = *${formatIDR(suiBuyRate)}*\n\nSilakan masukkan jumlah SUI yang ingin dibeli (misal: 10):`, { parse_mode: "Markdown" });
       });
     }
 
@@ -735,7 +779,8 @@ function setupBotLogic(activeBot: TelegramBot) {
       const opts = {
         reply_markup: {
           keyboard: [
-            [{ text: "🪙 BNB Testnet (Jual)" }, { text: "💵 USDT BEP20 (Jual)" }],
+            [{ text: "🪙 BNB Testnet (Jual)" }, { text: "💧 SUI Testnet (Jual)" }],
+            [{ text: "💵 USDT BEP20 (Jual)" }],
             [{ text: "❌ BATALKAN PROSES" }]
           ],
           resize_keyboard: true,
@@ -755,7 +800,8 @@ function setupBotLogic(activeBot: TelegramBot) {
       const opts = {
         reply_markup: {
           keyboard: [
-            [{ text: "🪙 BNB Testnet (Beli)" }, { text: "💵 USDT BEP20 (Beli)" }],
+            [{ text: "🪙 BNB Testnet (Beli)" }, { text: "💧 SUI Testnet (Beli)" }],
+            [{ text: "💵 USDT BEP20 (Beli)" }],
             [{ text: "❌ BATALKAN PROSES" }]
           ],
           resize_keyboard: true,
@@ -883,6 +929,11 @@ function setupBotLogic(activeBot: TelegramBot) {
           userStates.set(chatId, { action: "awaiting_bnb_amount", method: "BNB_TESTNET", tokenType: "BNB" } as any);
           activeBot.sendMessage(chatId, `🪙 <b>JUAL BNB TESTNET</b>\n\nRate Saat Ini: <code>1 BNB = ${formatIDR(bnbRate)}</code>\n\nSilakan masukkan jumlah BNB yang ingin dijual (misal: 0.5):`, { parse_mode: "HTML", ...cancelMenu });
         });
+      } else if (text.includes("SUI Testnet (Jual)")) {
+        updateRates().then(() => {
+          userStates.set(chatId, { action: "awaiting_bnb_amount", method: "SUI_TESTNET", tokenType: "SUI" } as any);
+          activeBot.sendMessage(chatId, `💧 <b>JUAL SUI TESTNET</b>\n\nRate Saat Ini: <code>1 SUI = ${formatIDR(suiRate)}</code>\n\nSilakan masukkan jumlah SUI yang ingin dijual (misal: 10):`, { parse_mode: "HTML", ...cancelMenu });
+        });
       } else if (text.includes("USDT BEP20 (Jual)")) {
         updateRates().then(() => {
           userStates.set(chatId, { action: "awaiting_bnb_amount", method: "USDT_BEP20", tokenType: "USDT" } as any);
@@ -903,6 +954,16 @@ function setupBotLogic(activeBot: TelegramBot) {
         updateRates().then(() => {
           userStates.set(chatId, { action: "awaiting_buy_bnb_amount", method: "BNB_TESTNET", tokenType: "BNB" } as any);
           activeBot.sendMessage(chatId, `🪙 <b>BELI BNB TESTNET</b>\n\nRate Saat Ini: <code>1 BNB = ${formatIDR(bnbBuyRate)}</code>\n\nSilakan masukkan jumlah BNB yang ingin dibeli (misal: 0.1):`, { parse_mode: "HTML", ...cancelMenu });
+        });
+      } else if (text.includes("SUI Testnet (Beli)")) {
+        if (!suiHotWallet) {
+          activeBot.sendMessage(chatId, "❌ <b>SISTEM OFFLINE</b>\n\nFitur Beli SUI sedang dinonaktifkan oleh admin (Sui Hot Wallet belum siap).", { parse_mode: "HTML", ...mainMenu });
+          userStates.delete(chatId);
+          return;
+        }
+        updateRates().then(() => {
+          userStates.set(chatId, { action: "awaiting_buy_bnb_amount", method: "SUI_TESTNET", tokenType: "SUI" } as any);
+          activeBot.sendMessage(chatId, `💧 <b>BELI SUI TESTNET</b>\n\nRate Saat Ini: <code>1 SUI = ${formatIDR(suiBuyRate)}</code>\n\nSilakan masukkan jumlah SUI yang ingin dibeli (misal: 10):`, { parse_mode: "HTML", ...cancelMenu });
         });
       } else if (text.includes("USDT BEP20 (Beli)")) {
         if (!hotWallet) {
@@ -995,31 +1056,42 @@ function setupBotLogic(activeBot: TelegramBot) {
         activeBot.sendMessage(chatId, `Jumlah ${(state as any).tokenType} tidak valid. Silakan masukkan angka:`);
         return;
       }
-      const rate = (state as any).tokenType === "BNB" ? bnbRate : usdtRate;
+      const tokenType = (state as any).tokenType;
+      const rate = tokenType === "BNB" ? bnbRate : (tokenType === "SUI" ? suiRate : usdtRate);
       const idrAmount = Math.floor(amount * rate);
       state.amount = idrAmount;
       (state as any).bnbAmount = amount;
       state.action = "awaiting_bnb_wallet";
-      activeBot.sendMessage(chatId, `Silakan masukkan *Alamat Wallet Pengirim* (Alamat Anda yang digunakan untuk mengirim ${(state as any).tokenType}):`, { parse_mode: "Markdown", ...cancelMenu });
+      activeBot.sendMessage(chatId, `Silakan masukkan *Alamat Wallet Pengirim* (Alamat Anda yang digunakan untuk mengirim ${tokenType}):`, { parse_mode: "Markdown", ...cancelMenu });
     }
 
     // Handle Token Wallet Address
     else if (state.action === "awaiting_bnb_wallet") {
       const wallet = msg.text?.trim();
-      if (!wallet || !wallet.startsWith("0x") || wallet.length !== 42) {
-        activeBot.sendMessage(chatId, "Alamat wallet tidak valid. Pastikan diawali dengan '0x' dan memiliki panjang yang benar:", cancelMenu);
-        return;
+      const tokenType = (state as any).tokenType;
+      
+      if (tokenType === "SUI") {
+        if (!wallet || !wallet.startsWith("0x") || wallet.length !== 66) {
+          activeBot.sendMessage(chatId, "Alamat wallet SUI tidak valid. Pastikan diawali dengan '0x' dan memiliki panjang 66 karakter:", cancelMenu);
+          return;
+        }
+      } else {
+        if (!wallet || !wallet.startsWith("0x") || wallet.length !== 42) {
+          activeBot.sendMessage(chatId, "Alamat wallet tidak valid. Pastikan diawali dengan '0x' dan memiliki panjang yang benar:", cancelMenu);
+          return;
+        }
       }
+      
       (state as any).senderWallet = wallet.toLowerCase();
       state.action = "awaiting_bnb_txid";
-      const tokenType = (state as any).tokenType;
+      const adminAddr = tokenType === "SUI" ? suiAdminAddress : bnbAdminAddress;
       activeBot.sendMessage(chatId, 
         `🔸 *KONFIRMASI JUAL ${tokenType}*\n\n` +
         `Jumlah: *${(state as any).bnbAmount} ${tokenType}*\n` +
         `Nominal Jual: *${formatIDR(state.amount!)}*\n` +
         `Wallet Pengirim: \`${(state as any).senderWallet}\`\n\n` +
         `Silakan kirim ${tokenType} ke alamat berikut:\n` +
-        `\`${bnbAdminAddress}\`\n\n` +
+        `\`${adminAddr}\`\n\n` +
         `Setelah transfer, kirimkan *TXID / Hash Transaksi* di sini sebagai bukti.`, 
         { parse_mode: "Markdown", ...cancelMenu }
       );
@@ -1040,55 +1112,96 @@ function setupBotLogic(activeBot: TelegramBot) {
       activeBot.sendMessage(chatId, "⏳ Sedang memverifikasi transaksi on-chain...");
 
       try {
-        const tx = await bscTestnetProvider.getTransaction(txid);
-        if (!tx) {
-          activeBot.sendMessage(chatId, "❌ Transaksi tidak ditemukan. Pastikan TXID benar dan sudah terkonfirmasi di network.");
-          return;
-        }
-
-        const receipt = await bscTestnetProvider.getTransactionReceipt(txid);
-        if (!receipt || receipt.status !== 1) {
-          activeBot.sendMessage(chatId, "❌ Transaksi gagal atau belum sukses di network.");
-          return;
-        }
-
-        // Verify amount and recipient
         const tokenType = (state as any).tokenType;
         let tokenSent = 0;
-        
-        if (tokenType === "BNB") {
-          // Verify recipient
-          if (tx.to?.toLowerCase() !== bnbAdminAddress) {
-            activeBot.sendMessage(chatId, `❌ Alamat tujuan tidak sesuai. Harusnya ke: \`${bnbAdminAddress}\``, { parse_mode: "Markdown" });
+        let senderAddr = "";
+
+        if (tokenType === "SUI") {
+          const txResult = await suiClient.getTransaction({
+            digest: txid,
+            include: {
+              effects: true,
+              transaction: true,
+              balanceChanges: true,
+            },
+          });
+
+          if (!txResult || txResult.$kind !== "Transaction") {
+            activeBot.sendMessage(chatId, "❌ Transaksi SUI tidak ditemukan atau gagal.");
             return;
           }
-          tokenSent = parseFloat(ethers.formatEther(tx.value));
-        } else {
-          // USDT BEP20 (ERC20)
-          if (tx.to?.toLowerCase() !== usdtContractAddress.toLowerCase()) {
-            activeBot.sendMessage(chatId, `❌ Transaksi ini bukan pengiriman USDT BEP20.`);
+
+          const tx = txResult.Transaction;
+
+          if (tx.status.status !== "success") {
+            activeBot.sendMessage(chatId, "❌ Transaksi SUI gagal di network.");
             return;
           }
+
+          senderAddr = tx.transaction?.data.sender || "";
           
-          const iface = new ethers.Interface(ERC20_ABI);
-          try {
-            const decoded = iface.parseTransaction({ data: tx.data, value: tx.value });
-            if (!decoded || decoded.name !== "transfer") {
-              activeBot.sendMessage(chatId, "❌ Transaksi bukan merupakan transfer token.");
-              return;
-            }
-            
-            const [to, amount] = decoded.args;
-            if (to.toLowerCase() !== bnbAdminAddress) {
-              activeBot.sendMessage(chatId, `❌ Alamat tujuan token tidak sesuai. Harusnya ke: \`${bnbAdminAddress}\``, { parse_mode: "Markdown" });
-              return;
-            }
-            
-            // Assuming 18 decimals for testnet USDT, adjust if needed
-            tokenSent = parseFloat(ethers.formatUnits(amount, 18));
-          } catch (e) {
-            activeBot.sendMessage(chatId, "❌ Gagal membedah data transaksi token.");
+          // Check balance changes for the admin address
+          const suiChange = tx.balanceChanges?.find(
+            (change) => 
+              change.address === suiAdminAddress && 
+              change.coinType === "0x2::sui::SUI"
+          );
+
+          if (!suiChange) {
+            activeBot.sendMessage(chatId, `❌ Alamat tujuan tidak sesuai. Harusnya ke: \`${suiAdminAddress}\``, { parse_mode: "Markdown" });
             return;
+          }
+
+          tokenSent = Math.abs(parseFloat(suiChange.amount)) / 1e9; // SUI has 9 decimals
+        } else {
+          const tx = await bscTestnetProvider.getTransaction(txid);
+          if (!tx) {
+            activeBot.sendMessage(chatId, "❌ Transaksi tidak ditemukan. Pastikan TXID benar dan sudah terkonfirmasi di network.");
+            return;
+          }
+
+          const receipt = await bscTestnetProvider.getTransactionReceipt(txid);
+          if (!receipt || receipt.status !== 1) {
+            activeBot.sendMessage(chatId, "❌ Transaksi gagal atau belum sukses di network.");
+            return;
+          }
+
+          senderAddr = tx.from;
+
+          if (tokenType === "BNB") {
+            // Verify recipient
+            if (tx.to?.toLowerCase() !== bnbAdminAddress) {
+              activeBot.sendMessage(chatId, `❌ Alamat tujuan tidak sesuai. Harusnya ke: \`${bnbAdminAddress}\``, { parse_mode: "Markdown" });
+              return;
+            }
+            tokenSent = parseFloat(ethers.formatEther(tx.value));
+          } else {
+            // USDT BEP20 (ERC20)
+            if (tx.to?.toLowerCase() !== usdtContractAddress.toLowerCase()) {
+              activeBot.sendMessage(chatId, `❌ Transaksi ini bukan pengiriman USDT BEP20.`);
+              return;
+            }
+            
+            const iface = new ethers.Interface(ERC20_ABI);
+            try {
+              const decoded = iface.parseTransaction({ data: tx.data, value: tx.value });
+              if (!decoded || decoded.name !== "transfer") {
+                activeBot.sendMessage(chatId, "❌ Transaksi bukan merupakan transfer token.");
+                return;
+              }
+              
+              const [to, amount] = decoded.args;
+              if (to.toLowerCase() !== bnbAdminAddress) {
+                activeBot.sendMessage(chatId, `❌ Alamat tujuan token tidak sesuai. Harusnya ke: \`${bnbAdminAddress}\``, { parse_mode: "Markdown" });
+                return;
+              }
+              
+              // Assuming 18 decimals for testnet USDT, adjust if needed
+              tokenSent = parseFloat(ethers.formatUnits(amount, 18));
+            } catch (e) {
+              activeBot.sendMessage(chatId, "❌ Gagal membedah data transaksi token.");
+              return;
+            }
           }
         }
 
@@ -1099,7 +1212,7 @@ function setupBotLogic(activeBot: TelegramBot) {
         }
 
         // Auto Approve
-        const rate = tokenType === "BNB" ? bnbRate : usdtRate;
+        const rate = tokenType === "BNB" ? bnbRate : (tokenType === "SUI" ? suiRate : usdtRate);
         const idrAmount = Math.floor(tokenSent * rate);
         const txId = db.prepare("INSERT INTO transactions (user_id, type, amount, method, tx_hash, status, details) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
           chatId, 'topup', idrAmount, state.method, txid, 'approved', `${tokenType}: ${tokenSent}\nAuto-Verified`
@@ -1110,7 +1223,7 @@ function setupBotLogic(activeBot: TelegramBot) {
         activeBot.sendMessage(chatId, 
           `✅ <b>PENJUALAN ${tokenType} BERHASIL!</b>\n\n` +
           `<b>Detail Transaksi:</b>\n` +
-          `• Wallet: <code>${tx.from}</code>\n` +
+          `• Wallet: <code>${senderAddr}</code>\n` +
           `• Jumlah: <b>${tokenSent} ${tokenType}</b>\n` +
           `• Rate: <b>${formatIDR(rate)}</b>\n` +
           `• Hasil: <b>${formatIDR(idrAmount)}</b>\n\n` +
@@ -1123,7 +1236,7 @@ function setupBotLogic(activeBot: TelegramBot) {
             `🤖 <b>AUTO-VERIFIED ${tokenType} SALE</b>\n\n` +
             `ID Transaksi: #${txId}\n` +
             `User: @${msg.from?.username || chatId}\n` +
-            `Wallet: <code>${tx.from}</code>\n` +
+            `Wallet: <code>${senderAddr}</code>\n` +
             `Aset: <b>${tokenSent} ${tokenType}</b>\n` +
             `Total IDR: <b>${formatIDR(idrAmount)}</b>\n` +
             `TXID: <code>${txid}</code>`,
@@ -1210,7 +1323,7 @@ function setupBotLogic(activeBot: TelegramBot) {
         return;
       }
       const tokenType = (state as any).tokenType;
-      const rate = tokenType === "BNB" ? bnbBuyRate : usdtBuyRate;
+      const rate = tokenType === "BNB" ? bnbBuyRate : (tokenType === "SUI" ? suiBuyRate : usdtBuyRate);
       const cost = Math.ceil(amount * rate);
       const user = getUser(chatId);
       
@@ -1229,34 +1342,62 @@ function setupBotLogic(activeBot: TelegramBot) {
     // Handle Buy Token Wallet
     else if (state.action === "awaiting_buy_bnb_wallet") {
       const wallet = msg.text?.trim();
-      if (!wallet || !wallet.startsWith("0x") || wallet.length !== 42) {
-        activeBot.sendMessage(chatId, "Alamat wallet tidak valid. Pastikan diawali dengan '0x' dan memiliki panjang yang benar:", cancelMenu);
-        return;
+      const tokenType = (state as any).tokenType;
+      
+      if (tokenType === "SUI") {
+        if (!wallet || !wallet.startsWith("0x") || wallet.length !== 66) {
+          activeBot.sendMessage(chatId, "Alamat wallet SUI tidak valid. Pastikan diawali dengan '0x' dan memiliki panjang 66 karakter:", cancelMenu);
+          return;
+        }
+      } else {
+        if (!wallet || !wallet.startsWith("0x") || wallet.length !== 42) {
+          activeBot.sendMessage(chatId, "Alamat wallet tidak valid. Pastikan diawali dengan '0x' dan memiliki panjang yang benar:", cancelMenu);
+          return;
+        }
       }
       
       const tokenAmount = (state as any).bnbAmount;
-      const tokenType = (state as any).tokenType;
       const cost = state.amount!;
       
       activeBot.sendMessage(chatId, `⏳ Sedang memproses pengiriman *${tokenAmount} ${tokenType}* ke \`${wallet}\`...`, { parse_mode: "Markdown" });
 
       try {
-        if (!hotWallet) throw new Error("Hot wallet not initialized");
-
         let txHash = "";
-        if (tokenType === "BNB") {
-          const tx = await hotWallet.sendTransaction({
-            to: wallet,
-            value: ethers.parseEther(tokenAmount.toString())
+        
+        if (tokenType === "SUI") {
+          if (!suiHotWallet) throw new Error("Sui hot wallet not initialized");
+          
+          const txb = new Transaction();
+          const [coin] = txb.splitCoins(txb.gas, [txb.pure.u64(Math.floor(tokenAmount * 1e9))]);
+          txb.transferObjects([coin], txb.pure.address(wallet));
+          
+          const result = await suiClient.signAndExecuteTransaction({
+            signer: suiHotWallet,
+            transaction: txb,
           });
-          txHash = tx.hash;
+          
+          if (result.$kind === 'Transaction') {
+            txHash = result.Transaction.digest;
+          } else {
+            throw new Error("Sui transaction failed");
+          }
         } else {
-          // USDT BEP20
-          const usdtContract = new ethers.Contract(usdtContractAddress, ERC20_ABI, hotWallet);
-          // Assuming 18 decimals for testnet USDT
-          const amountWei = ethers.parseUnits(tokenAmount.toString(), 18);
-          const tx = await usdtContract.transfer(wallet, amountWei);
-          txHash = tx.hash;
+          if (!hotWallet) throw new Error("Hot wallet not initialized");
+
+          if (tokenType === "BNB") {
+            const tx = await hotWallet.sendTransaction({
+              to: wallet,
+              value: ethers.parseEther(tokenAmount.toString())
+            });
+            txHash = tx.hash;
+          } else {
+            // USDT BEP20
+            const usdtContract = new ethers.Contract(usdtContractAddress, ERC20_ABI, hotWallet);
+            // Assuming 18 decimals for testnet USDT
+            const amountWei = ethers.parseUnits(tokenAmount.toString(), 18);
+            const tx = await usdtContract.transfer(wallet, amountWei);
+            txHash = tx.hash;
+          }
         }
 
         // Deduct balance
