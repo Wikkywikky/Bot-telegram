@@ -7,7 +7,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { ethers } from "ethers";
 
-dotenv.config();
+dotenv.config({ quiet: true } as any);
 
 // Global Error Handling to prevent crashes
 process.on("unhandledRejection", (reason, promise) => {
@@ -26,7 +26,6 @@ let db: Database.Database;
 try {
   db = new Database("bot_database.db");
   db.pragma('journal_mode = WAL');
-  console.log("✅ Database connected.");
 } catch (err) {
   console.error("❌ Database connection failed:", err);
   process.exit(1);
@@ -77,7 +76,7 @@ db.exec(`
   INSERT OR IGNORE INTO settings (key, value) VALUES ('acc_MANDIRI', '1234567890');
   INSERT OR IGNORE INTO settings (key, value) VALUES ('name_MANDIRI', 'ADMIN MANDIRI');
 
-  // Method Statuses
+  -- Method Statuses
   INSERT OR IGNORE INTO settings (key, value) VALUES ('status_topup_OVO', 'true');
   INSERT OR IGNORE INTO settings (key, value) VALUES ('status_topup_DANA', 'true');
   INSERT OR IGNORE INTO settings (key, value) VALUES ('status_topup_GOPAY', 'true');
@@ -1429,9 +1428,9 @@ async function startServer() {
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa",
+        logLevel: "silent",
       });
       app.use(vite.middlewares);
-      console.log("✅ Vite ready.");
     } catch (err) {
       console.error("❌ Vite error:", err);
     }
