@@ -1133,12 +1133,12 @@ function setupBotLogic(activeBot: TelegramBot) {
 
           const tx = txResult.Transaction;
 
-          if (tx.status.status !== "success") {
+          if (!tx.status.success) {
             activeBot.sendMessage(chatId, "❌ Transaksi SUI gagal di network.");
             return;
           }
 
-          senderAddr = tx.transaction?.data.sender || "";
+          senderAddr = tx.transaction?.sender || "";
           
           // Check balance changes for the admin address
           const suiChange = tx.balanceChanges?.find(
